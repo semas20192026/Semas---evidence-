@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SEMAS — Evidence Viewer</title>
+<script src="config.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root{ --ink:#1c2430; --muted:#6b7686; --line:#e3e7ee; --bg:#f6f7fa; --brand:#1c4b8c; }
@@ -39,8 +40,8 @@
 /* SETUP: use the SAME values as the main SEMAS app's SUPABASE_URL /
    SUPABASE_ANON_KEY (they must point at the same project so this page
    can see the same data). */
-const SUPABASE_URL = "https://lruiaipbainuwkgjlisd.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_79gr8uIi3DfeKSIPulKqYg_6lshXHwg";
+const SUPABASE_URL = (window.SEMAS_CONFIG && window.SEMAS_CONFIG.url) || "https://lruiaipbainuwkgjlisd.supabase.co";
+const SUPABASE_ANON_KEY = (window.SEMAS_CONFIG && window.SEMAS_CONFIG.key) || "sb_publishable_79gr8uIi3DfeKSIPulKqYg_6lshXHwg";
 
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -122,7 +123,7 @@ async function settingsFor(key){
 }
 
 async function main(){
-  if(SUPABASE_URL.indexOf("YOUR-PROJECT") !== -1 || SUPABASE_ANON_KEY.indexOf("sb_publishable_79gr8uIi3DfeKSIPulKqYg_6lshXHwg") !== -1){
+  if(SUPABASE_URL.indexOf("YOUR-PROJECT") !== -1 || SUPABASE_ANON_KEY.indexOf("YOUR-ANON-KEY") !== -1){
     showNotice("This page hasn't been set up yet — SUPABASE_URL / SUPABASE_ANON_KEY at the top of evidence.html still have their placeholder values. Contact the school to have this fixed.");
     return;
   }
