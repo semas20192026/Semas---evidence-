@@ -27,6 +27,9 @@
   .docbox{display:block;padding:20px 8px;text-align:center;font-size:12px;text-decoration:none;color:var(--ink)}
   .muted{color:var(--muted);font-size:13px}
   a{color:var(--brand)}
+  details.learner{margin-bottom:18px}
+  details.learner>summary{cursor:pointer;background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin-bottom:10px;list-style:none;font-size:15px}
+  details.learner>summary::-webkit-details-marker{display:none}
 </style>
 </head>
 <body>
@@ -88,117 +91,203 @@ function activityScoreForScope(activity, scopeType, scopeId, milestoneId, scores
   return sc && sc.score!==undefined ? sc.score : undefined;
 }
 
+/* ---- Kiswahili: shown whenever the project's subject is Kiswahili ---- */
+const SW = {
+  "Loading evidence…":"Inapakia ushahidi…","Score:":"Alama:","Group":"Kikundi","Learner":"Mwanafunzi","Adm No":"Nambari ya Usajili",
+  "No activities recorded for this project yet.":"Hakuna shughuli zilizorekodiwa kwa mradi huu bado.",
+  "No evidence uploaded yet.":"Hakuna ushahidi uliopakiwa bado.","File unavailable":"Faili haipatikani","Document":"Hati",
+  "Learners":"Wanafunzi","Groups":"Vikundi","with evidence":"wenye ushahidi","Whole project evidence":"Ushahidi wa mradi mzima",
+  "No learners found for this project.":"Hakuna wanafunzi waliopatikana kwa mradi huu.","No groups found for this project.":"Hakuna vikundi vilivyopatikana kwa mradi huu.",
+  "Members":"Wanachama","Project completed":"Mradi umekamilika"
+};
+let SWON = false;
+const L = k => (SWON && SW[k]) ? SW[k] : k;
+function isKiswahili(s){
+  if(!s) return false;
+  const n = String(s.name||"").toLowerCase().replace(/[^a-z]/g,""), c = norm(s.code);
+  return n.indexOf("kiswahili")===0 || c==="KIS" || c==="KISC" || c==="KSW";
+}
+/* A KNEC project is shared by every school: match it to THIS school's own subject by code / name. */
+function resolveKnecSubject(p, subs){
+  const code = norm(p.subjectCode), name = norm(p.subjectName), cur = p.subjectCurriculum || "";
+  const sameCur = s => !cur || !s.curriculum || s.curriculum==="Both" || s.curriculum===cur;
+  return subs.find(s=>code && norm(s.code)===code && sameCur(s)) || subs.find(s=>name && norm(s.name)===name && sameCur(s))
+      || subs.find(s=>code && norm(s.code)===code) || subs.find(s=>name && norm(s.name)===name) || null;
+}
+async function settingsFor(key){
+  try{
+    const { data } = await sb.from("app_settings").select("data").eq("key", key).maybeSingle();
+    return (data && data.data) || null;
+  }catch(e){ return null; }
+}
+
 async function main(){
-  if(SUPABASE_URL.indexOf("YOUR-PROJECT") !== -1 || SUPABASE_ANON_KEY.indexOf("YOUR-ANON-KEY") !== -1){
+  if(SUPABASE_URL.indexOf("YOUR-PROJECT") !== -1 || SUPABASE_ANON_KEY.indexOf("sb_publishable_79gr8uIi3DfeKSIPulKqYg_6lshXHwg") !== -1){
     showNotice("This page hasn't been set up yet — SUPABASE_URL / SUPABASE_ANON_KEY at the top of evidence.html still have their placeholder values. Contact the school to have this fixed.");
     return;
   }
   const params = new URLSearchParams(location.search);
-  const code = (params.get("code") || "").trim();
-  if(!code){ showNotice("No evidence code was given. Check the link you were sent."); return; }
+  const hashParams = new URLSearchParams((location.hash || "").replace(/^#\??/, ""));
+  const getp = k => (params.get(k) || hashParams.get(k) || "").trim();
+  let projectCode = getp("project");   // whole-project link: SCHOOL-SUBJ-FORM-YEAR
+  let code = getp("code");             // single learner/group link: IDNO-SCHOOL-SUBJ-FORM-YEAR
+  if(!projectCode && code && code.split("-").length === 4){ projectCode = code; code = ""; }
+  if(!code && !projectCode){
+    showNotice("No evidence code was given. Check the link you were sent." +
+      (location.search || location.hash ? "" : "<br><small>The link opened with nothing after the page name — part of it was probably cut off when it was shared. Ask the school to send the whole link again.</small>"));
+    return;
+  }
 
-  const parts = code.split("-");
-  if(parts.length !== 5){ showNotice("This evidence link looks malformed. Please check it with the school."); return; }
-  const [assNoCode, schoolCode, subjCode, formCode, yearStr] = parts;
+  const parts = (projectCode || code).split("-");
+  if(parts.length !== (projectCode ? 4 : 5)){ showNotice("This evidence link looks malformed. Please check it with the school."); return; }
+  const idNoCode = projectCode ? null : parts[0];
+  const [schoolCode, subjCode, formCode, yearStr] = projectCode ? parts : parts.slice(1);
   const year = parseInt(yearStr, 10);
 
-  const [subjects, projects, students] = await Promise.all([
-    fetchAll("subjects"), fetchAll("projects"), fetchAll("students")
-  ]);
+  const [subjects, projects, students] = await Promise.all([fetchAll("subjects"), fetchAll("projects"), fetchAll("students")]);
+  let schools = []; try{ schools = await fetchAll("schools"); }catch(e){ schools = []; }
+  // Which school is this link for? (codes are unique per school; if the directory can't be read we fall back to the old, unscoped lookup)
+  const school = schools.find(s => norm(s.code) === schoolCode) || schools.find(s => norm(s.regNo) === schoolCode) || null;
+  const inSchool = r => !school || r.schoolId === school.id;
+  const schoolSubjects = school ? subjects.filter(s => s.schoolId === school.id) : subjects;
 
-  const subject = subjects.find(s => norm(s.code) === subjCode);
-  if(!subject){ showNotice("Couldn't find a matching subject for this link."); return; }
+  const subjectByCode = schoolSubjects.find(s => norm(s.code) === subjCode) || null;
+  const cands = projects.filter(p => norm(p.form) === formCode && Number(p.year) === year && (!school || p.schoolId === school.id || p.knec));
+  let project = cands.find(p => !p.knec && subjectByCode && p.subjectId === subjectByCode.id)
+             || cands.find(p => p.knec && ((subjectByCode && (resolveKnecSubject(p, schoolSubjects)||{}).id === subjectByCode.id) || norm(p.subjectCode) === subjCode));
+  if(!project){ showNotice(subjectByCode || cands.length ? "Couldn't find a matching project for this link." : "Couldn't find a matching subject for this link."); return; }
+  const subject = project.knec ? (resolveKnecSubject(project, schoolSubjects) || {name:project.subjectName, code:project.subjectCode})
+                               : (schoolSubjects.find(s => s.id === project.subjectId) || subjectByCode);
+  SWON = isKiswahili(subject);
+  if(SWON) document.documentElement.lang = "sw";
 
-  const project = projects.find(p =>
-    p.subjectId === subject.id && norm(p.form) === formCode && Number(p.year) === year
-  );
-  if(!project){ showNotice("Couldn't find a matching project for this link."); return; }
-
-  const student = students.find(s => norm(s.assessmentNo || s.admNo || s.indexNo) === assNoCode);
-  if(!student){ showNotice("Couldn't find a matching learner for this link."); return; }
-
-  let scopeType, scopeId, scopeLabel;
-  if(project.mode === "group"){
-    const groups = (await fetchAll("project_groups")).filter(g => g.projectId === project.id);
-    const grp = groups.find(g => (g.studentIds||[]).includes(student.id));
-    if(!grp){ showNotice(esc(student.name) + " is not part of a group in this project."); return; }
-    scopeType = "group"; scopeId = grp.id; scopeLabel = grp.name;
-  } else {
-    scopeType = "student"; scopeId = student.id; scopeLabel = student.name;
+  // This school's own Individual/Group choice for a shared KNEC project.
+  let mode = project.mode || "individual";
+  if(school && project.knec){
+    const st = await settingsFor("projectSettings@" + school.id);
+    if(st && st.modes && st.modes[project.id]) mode = st.modes[project.id];
   }
 
-  const [allActivities, allMilestones, allEvidence, allScores] = await Promise.all([
-    fetchAll("project_activities"), fetchAll("project_milestones"),
-    fetchAll("project_evidence"), fetchAll("project_scores")
+  const needGroups = mode === "group";
+  const [allActivities, allMilestones, allEvidence, allScores, allGroups] = await Promise.all([
+    fetchAll("project_activities"), fetchAll("project_milestones"), fetchAll("project_evidence"), fetchAll("project_scores"),
+    needGroups ? fetchAll("project_groups") : Promise.resolve([])
   ]);
-  const activities = allActivities.filter(a => a.projectId === project.id && (!a.groupId || a.groupId === scopeId));
-  const milestones = allMilestones.filter(m => m.projectId === project.id)
-    .sort((a,b) => (a.order||0) - (b.order||0));
+  const groups = allGroups.filter(g => g.projectId === project.id && inSchool(g));
+  const evidenceRows = allEvidence.filter(e => e.projectId === project.id && inSchool(e));
+  const scoreRows = allScores.filter(s => s.projectId === project.id && inSchool(s));
+  const milestones = allMilestones.filter(m => m.projectId === project.id && (m.knec || inSchool(m))).sort((a,b) => (a.order||0) - (b.order||0));
+  const baseActivities = allActivities.filter(a => a.projectId === project.id && (a.knec || inSchool(a)));
 
-  const instances = [];
-  activities.forEach(a => {
-    if(a.scope === "single"){
-      instances.push({ activity:a, milestoneId: a.milestoneId||"", milestoneName: (milestones.find(m=>m.id===a.milestoneId)||{}).name || null });
-    } else if(milestones.length){
-      milestones.forEach(m => instances.push({ activity:a, milestoneId:m.id, milestoneName:m.name }));
-    } else {
-      instances.push({ activity:a, milestoneId:"", milestoneName:null });
-    }
-  });
-
-  const app = document.getElementById("app");
-  let html = `<div class="head">
-      <h1>${esc(project.title)}</h1>
-      <div class="meta">${esc(subject.name)} &middot; ${esc(project.form)} &middot; ${esc(project.year)}</div>
-      <div class="meta">${project.mode==='group' ? 'Group' : 'Learner'}: <b>${esc(scopeLabel)}</b>${project.mode==='group' ? '' : ' &middot; Adm No: ' + esc(student.admNo||'')}</div>
-    </div>`;
-
-  if(instances.length === 0){
-    html += `<div class="card muted">No activities recorded for this project yet.</div>`;
-  } else {
-    instances.forEach((inst, i) => {
-      const a = inst.activity;
-      const max = activityMaxScore(a);
-      const total = activityScoreForScope(a, scopeType, scopeId, inst.milestoneId, allScores);
-      html += `<div class="card">
+  const tasks = [];       // evidence grids to fill in afterwards
+  let gridSeq = 0;
+  function scopeCardsHtml(scopeType, scopeId){
+    const activities = baseActivities.filter(a => !a.groupId || a.groupId === scopeId);
+    const instances = [];
+    activities.forEach(a => {
+      if(a.scope === "single") instances.push({ activity:a, milestoneId:a.milestoneId||"", milestoneName:(milestones.find(m=>m.id===a.milestoneId)||{}).name || null });
+      else if(milestones.length) milestones.forEach(m => instances.push({ activity:a, milestoneId:m.id, milestoneName:m.name }));
+      else instances.push({ activity:a, milestoneId:"", milestoneName:null });
+    });
+    if(!instances.length) return `<div class="card muted">${esc(L("No activities recorded for this project yet."))}</div>`;
+    return instances.map(inst => {
+      const a = inst.activity, max = activityMaxScore(a);
+      const total = activityScoreForScope(a, scopeType, scopeId, inst.milestoneId, scoreRows);
+      const rec = evidenceRows.find(e => e.activityId===a.id && (e.milestoneId||"")===inst.milestoneId && e.scopeType===scopeType && e.scopeId===scopeId);
+      const id = "grid-" + (gridSeq++);
+      tasks.push({ id, items: rec ? (rec.items||[]) : [] });
+      return `<div class="card">
         <div class="card-head"><b>${esc(a.title)}</b>${inst.milestoneName ? `<span class="badge">${esc(inst.milestoneName)}</span>` : ''}</div>
         <p class="desc">${esc(a.description||"")}</p>
-        <div class="score">Score: ${total!==undefined ? total : "—"} / ${max}</div>
-        <div class="evgrid" id="grid-${i}"><div class="muted">Loading evidence…</div></div>
+        <div class="score">${esc(L("Score:"))} ${total!==undefined ? total : "—"} / ${max}</div>
+        <div class="evgrid" id="${id}"><div class="muted">${esc(L("Loading evidence…"))}</div></div>
       </div>`;
-    });
+    }).join("");
   }
-  app.innerHTML = html;
+  const headHtml = extra => `<div class="head">
+      <h1>${esc(project.title)}</h1>
+      <div class="meta">${esc(subject ? subject.name : "")} &middot; ${esc(project.form)} &middot; ${esc(project.year)}${project.status==="Completed" ? " &middot; " + esc(L("Project completed")) : ""}</div>
+      ${extra}
+    </div>`;
 
-  for(let i = 0; i < instances.length; i++){
-    const inst = instances[i];
-    const grid = document.getElementById("grid-" + i);
-    if(!grid) continue;
-    const rec = allEvidence.find(e => e.activityId===inst.activity.id && (e.milestoneId||"")===inst.milestoneId && e.scopeType===scopeType && e.scopeId===scopeId);
-    const items = rec ? (rec.items||[]) : [];
-    if(!items.length){ grid.innerHTML = '<div class="muted">No evidence uploaded yet.</div>'; continue; }
-    grid.innerHTML = "";
-    for(const ev of items){
-      const el = document.createElement("div");
-      el.className = "evitem";
-      el.innerHTML = '<div class="loading">…</div>';
-      grid.appendChild(el);
-      try{
-        const { data: blob, error } = await sb.storage.from("evidence").download(ev.id);
-        if(error || !blob) throw error || new Error("missing file");
-        const url = URL.createObjectURL(blob);
-        if(ev.type === "video"){
-          el.innerHTML = `<video src="${url}" controls></video><div class="cap">${esc(ev.caption||ev.fileName||"")}</div>`;
-        } else if(ev.type === "photo"){
-          el.innerHTML = `<a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="evidence"></a><div class="cap">${esc(ev.caption||ev.fileName||"")}</div>`;
-        } else {
-          el.innerHTML = `<a class="docbox" href="${url}" download="${esc(ev.fileName||'document')}">📄 ${esc(ev.fileName||"Document")}</a><div class="cap">${esc(ev.caption||"")}</div>`;
+  let html;
+  if(projectCode){
+    // ---- Whole-project view: every learner / group and all their evidence at once ----
+    let sections = [];
+    if(mode === "group"){
+      const sorted = groups.slice().sort((a,b)=>String(a.name||"").localeCompare(String(b.name||""), undefined, {numeric:true}));
+      sections = sorted.map(g => {
+        const names = (g.studentIds||[]).map(id => (students.find(s=>s.id===id)||{}).name).filter(Boolean);
+        return { type:"group", id:g.id, title:g.name, sub: names.length ? L("Members") + ": " + names.join(", ") : "" };
+      });
+    } else {
+      const roster = students.filter(s => inSchool(s) && norm(s.form) === formCode && (!subject || !subject.id || !Array.isArray(s.subjectIds) || s.subjectIds.includes(subject.id)))
+        .sort((a,b)=>String(a.name||"").localeCompare(String(b.name||"")));
+      sections = roster.map(s => ({ type:"student", id:s.id, title:s.name, sub: L("Adm No") + ": " + (s.admNo||"") }));
+    }
+    const withEv = sections.filter(sec => evidenceRows.some(e => e.scopeType===sec.type && e.scopeId===sec.id && (e.items||[]).length)).length;
+    html = headHtml(`<div class="meta">${esc(L(mode==="group" ? "Groups" : "Learners"))}: <b>${sections.length}</b> &middot; ${esc(L("with evidence"))}: <b>${withEv}</b></div>`);
+    if(!sections.length){
+      html += `<div class="card muted">${esc(L(mode==="group" ? "No groups found for this project." : "No learners found for this project."))}</div>`;
+    } else {
+      html += sections.map(sec => `<details class="learner" open>
+        <summary><b>${esc(sec.title)}</b>${sec.sub ? `<span class="meta"> &middot; ${esc(sec.sub)}</span>` : ""}</summary>
+        ${scopeCardsHtml(sec.type, sec.id)}
+      </details>`).join("");
+    }
+  } else {
+    // ---- Single learner / group view ----
+    const curSettings = school ? await settingsFor("curriculum@" + school.id) : null;
+    const isCBC = !!(curSettings && (curSettings.gradesCBC||[]).includes(project.form));
+    const order = isCBC ? ["assessmentNo","admNo","indexNo"] : ["indexNo","admNo","assessmentNo"];
+    const pool = students.filter(s => inSchool(s) && norm(s.form) === formCode);
+    let student = null;
+    for(const f of order){ student = pool.find(s => norm(s[f]) === idNoCode); if(student) break; }
+    if(!student) student = students.filter(inSchool).find(s => norm(s.indexNo) === idNoCode || norm(s.assessmentNo) === idNoCode || norm(s.admNo) === idNoCode);
+    if(!student){ showNotice("Couldn't find a matching learner for this link."); return; }
+    let scopeType, scopeId, scopeLabel;
+    if(mode === "group"){
+      const grp = groups.find(g => (g.studentIds||[]).includes(student.id));
+      if(!grp){ showNotice(esc(student.name) + (SWON ? " si mwanachama wa kikundi chochote katika mradi huu." : " is not part of a group in this project.")); return; }
+      scopeType = "group"; scopeId = grp.id; scopeLabel = grp.name;
+    } else { scopeType = "student"; scopeId = student.id; scopeLabel = student.name; }
+    html = headHtml(`<div class="meta">${esc(L(mode==='group' ? 'Group' : 'Learner'))}: <b>${esc(scopeLabel)}</b>${mode==='group' ? '' : ' &middot; ' + esc(L('Adm No')) + ': ' + esc(student.admNo||'')}</div>`)
+         + scopeCardsHtml(scopeType, scopeId);
+  }
+  document.getElementById("app").innerHTML = html;
+
+  // Fill the evidence grids, a few files at a time so a big project stays responsive.
+  let next = 0;
+  async function worker(){
+    while(next < tasks.length){
+      const t = tasks[next++];
+      const grid = document.getElementById(t.id);
+      if(!grid) continue;
+      if(!t.items.length){ grid.innerHTML = `<div class="muted">${esc(L("No evidence uploaded yet."))}</div>`; continue; }
+      grid.innerHTML = "";
+      for(const ev of t.items){
+        const el = document.createElement("div");
+        el.className = "evitem";
+        el.innerHTML = '<div class="loading">…</div>';
+        grid.appendChild(el);
+        try{
+          const { data: blob, error } = await sb.storage.from("evidence").download(ev.id);
+          if(error || !blob) throw error || new Error("missing file");
+          const url = URL.createObjectURL(blob);
+          if(ev.type === "video"){
+            el.innerHTML = `<video src="${url}" controls></video><div class="cap">${esc(ev.caption||ev.fileName||"")}</div>`;
+          } else if(ev.type === "photo"){
+            el.innerHTML = `<a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="evidence"></a><div class="cap">${esc(ev.caption||ev.fileName||"")}</div>`;
+          } else {
+            el.innerHTML = `<a class="docbox" href="${url}" download="${esc(ev.fileName||'document')}">📄 ${esc(ev.fileName||L("Document"))}</a><div class="cap">${esc(ev.caption||"")}</div>`;
+          }
+        }catch(e){
+          el.innerHTML = `<div class="missing">${esc(L("File unavailable"))}</div>`;
         }
-      }catch(e){
-        el.innerHTML = '<div class="missing">File unavailable</div>';
       }
     }
   }
+  await Promise.all([worker(), worker(), worker(), worker()]);
 }
 
 main().catch(e => {
